@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
+import { Client } from '@gradio/client';
 import {
   UploadCloud,
   CheckCircle2,
@@ -16,11 +16,11 @@ import {
   ExternalLink
 } from 'lucide-react';
 
-const DEFAULT_API_URL = import.meta.env.VITE_API_BASE_URL || 'https://thanmayeed2006-asd-screening-backend.hf.space';
+const DEFAULT_SPACE = import.meta.env.VITE_HF_SPACE || 'thanmayeed2006/asd-backend';
 
 export default function App() {
-  const [apiUrl, setApiUrl] = useState(DEFAULT_API_URL);
-  const [tempApiUrl, setTempApiUrl] = useState(DEFAULT_API_URL);
+  const [apiUrl, setApiUrl] = useState(DEFAULT_SPACE);
+  const [tempApiUrl, setTempApiUrl] = useState(DEFAULT_SPACE);
   const [healthStatus, setHealthStatus] = useState('checking'); // 'checking' | 'healthy' | 'offline'
   const [selectedFile, setSelectedFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
@@ -33,19 +33,18 @@ export default function App() {
 
   const fileInputRef = useRef(null);
 
-  // Check backend health
-  const checkHealth = async (urlToCheck = apiUrl) => {
+  // Check Space connection
+  const checkHealth = async (spaceToConnect = apiUrl) => {
     setHealthStatus('checking');
     try {
-      const cleanUrl = urlToCheck.replace(/\/$/, '');
-      const res = await axios.get(`${cleanUrl}/health`, { timeout: 8000 });
-      if (res.status === 200) {
+      const client = await Client.connect(spaceToConnect);
+      if (client) {
         setHealthStatus('healthy');
       } else {
         setHealthStatus('offline');
       }
     } catch (err) {
-      console.warn('Backend health check error:', err.message);
+      console.warn('Backend connection error:', err.message);
       setHealthStatus('offline');
     }
   };
@@ -108,10 +107,10 @@ export default function App() {
     setIsAnalyzing(true);
     setError(null);
     setResult(null);
-    setProgressStep('Uploading video & extracting key sampled frames...');
+    setProgressStep('Connecting to AI Space & uploading video...');
 
     const timer1 = setTimeout(() => {
-      setProgressStep('Running deep visual feature extraction via VGG16...');
+      setProgressStep('Extracting key video frames & processing VGG16 features...');
     }, 2500);
 
     const timer2 = setTimeout(() => {
@@ -119,27 +118,42 @@ export default function App() {
     }, 5500);
 
     try {
-      const formData = new FormData();
-      formData.append('video', selectedFile);
+      const client = await Client.connect(apiUrl);
 
-      const cleanUrl = apiUrl.replace(/\/$/, '');
-      const response = await axios.post(`${cleanUrl}/predict`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-        timeout: 180000, // 3 minutes timeout for video processing
+      const response = await client.predict('/predict', {
+        video_path: selectedFile,
       });
 
-      setResult(response.data);
+      // Gradio output: response.data[0] = summary text, response.data[1] = confidence object
+      const summaryText = response.data[0] || '';
+      const scores = response.data[1] || {};
+
+      let asdScore = Number(scores.ASD ?? scores['ASD'] ?? 0);
+      let tdScore = Number(scores.TD ?? scores['TD'] ?? 0);
+
+      // Handle softmax normalization fallback if needed
+      if (asdScore + tdScore > 0 && Math.abs(asdScore + tdScore - 1) > 0.05) {
+        const sum = asdScore + tdScore;
+        asdScore = asdScore / sum;
+        tdScore = tdScore / sum;
+      }
+
+      const predictedClass = asdScore >= tdScore ? 'ASD' : 'TD';
+
+      setResult({
+        predicted_class: predictedClass,
+        summary: summaryText,
+        model_scores: {
+          ASD: asdScore,
+          TD: tdScore,
+        },
+        frames_extracted: 5,
+      });
     } catch (err) {
       console.error('Prediction failed:', err);
-      let msg = 'Failed to analyze video. Please check your backend connection and video format.';
-      if (err.response?.data?.detail) {
-        msg = err.response.data.detail;
-      } else if (err.response?.data?.error) {
-        msg = err.response.data.error;
-      } else if (err.code === 'ECONNABORTED') {
-        msg = 'Request timed out. The server took too long to process the video.';
+      let msg = 'Failed to analyze video. Check that the Space is running and reachable.';
+      if (err.message) {
+        msg = err.message;
       }
       setError(msg);
     } finally {
@@ -188,17 +202,17 @@ export default function App() {
                 healthStatus === 'healthy' ? 'pulse-green' : healthStatus === 'checking' ? 'pulse-yellow' : 'pulse-red'
               }`}></span>
               <small className="fw-medium text-secondary">
-                Backend: {healthStatus === 'healthy' ? 'Online' : healthStatus === 'checking' ? 'Checking...' : 'Offline'}
+                Backend: {healthStatus === 'healthy' ? 'Online' : healthStatus === 'checking' ? 'Connecting...' : 'Offline'}
               </small>
             </div>
 
             <button
               onClick={() => { setTempApiUrl(apiUrl); setShowSettings(true); }}
               className="btn btn-outline-secondary btn-sm d-flex align-items-center gap-1 rounded-pill"
-              title="Configure API Endpoint"
+              title="Configure Backend Space"
             >
               <Settings size={15} />
-              <span className="d-none d-md-inline">API Settings</span>
+              <span className="d-none d-md-inline">Space Settings</span>
             </button>
           </div>
         </div>
@@ -214,7 +228,7 @@ export default function App() {
             Early Autism Screening from Behavioral Video
           </h1>
           <p className="lead text-muted mx-auto" style={{ maxWidth: '680px' }}>
-            AutiTrack analyzes sampled video frames through a fine-tuned VGG16 deep feature extractor and an LSTM sequence network to distinguish behavioral markers.
+            AutiTrack extracts visual feature representations across sampled video frames using VGG16 and evaluates temporal behavior with an LSTM sequence model.
           </p>
         </div>
       </div>
@@ -473,22 +487,22 @@ export default function App() {
           <div className="modal-dialog modal-dialog-centered">
             <div className="modal-content border-0 shadow">
               <div className="modal-header">
-                <h5 className="modal-title fw-bold">Backend API Settings</h5>
+                <h5 className="modal-title fw-bold">Hugging Face Space Settings</h5>
                 <button type="button" className="btn-close" onClick={() => setShowSettings(false)}></button>
               </div>
               <form onSubmit={saveSettings}>
                 <div className="modal-body">
-                  <label className="form-label fw-semibold small">Hugging Face Backend URL</label>
+                  <label className="form-label fw-semibold small">Hugging Face Space ID or URL</label>
                   <input
-                    type="url"
+                    type="text"
                     className="form-control"
                     value={tempApiUrl}
                     onChange={(e) => setTempApiUrl(e.target.value)}
-                    placeholder="https://your-space.hf.space"
+                    placeholder="thanmayeed2006/asd-backend"
                     required
                   />
                   <div className="form-text mt-2">
-                    Default: <code>https://thanmayeed2006-asd-screening-backend.hf.space</code>
+                    Default: <code>thanmayeed2006/asd-backend</code>
                   </div>
                 </div>
                 <div className="modal-footer">
@@ -512,7 +526,7 @@ export default function App() {
             <strong>AutiTrack</strong> — Machine Learning Video Classification Project
           </p>
           <p className="mb-0" style={{ fontSize: '11px' }}>
-            Built with React, Flask, TensorFlow & VGG16-LSTM. Deployed on Vercel & Hugging Face.
+            Powered by VGG16-LSTM Model. Connected to Hugging Face Space: <code>{apiUrl}</code>
           </p>
         </div>
       </footer>
